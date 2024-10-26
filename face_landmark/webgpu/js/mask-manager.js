@@ -1,91 +1,120 @@
-// mask-manager.js
 export class MaskManager {
     constructor(device, textureLoader) {
-        if (!device) throw new Error('GPU device is required');
-        if (!textureLoader) throw new Error('TextureLoader is required');
-
         this.device = device;
         this.textureLoader = textureLoader;
         this.masks = new Map();
         this.activeMaskId = null;
         this.maskQueue = [];
         this.maxMasks = 5;
-        
-        // Create bind group layout during initialization
         this.bindGroupLayout = this.createBindGroupLayout();
     }
 
     createBindGroupLayout() {
+        return this.device.createBindGroupLayout({
+            entries: [
+                {
+                    binding: 0,
+                    visibility: GPUShaderStage.FRAGMENT,
+                    sampler: { type: 'filtering' }
+                },
+                {
+                    binding: 1,
+                    visibility: GPUShaderStage.FRAGMENT,
+                    texture: { sampleType: 'float' }
+                }
+            ]
+        });
+    }
+
+    createBindGroup(textureData) {
+        if (!this.bindGroupLayout) {
+            throw new Error('Bind group layout not initialized');
+        }
+
+        if (!textureData?.texture || !textureData?.sampler) {
+            console.error('Invalid texture data:', textureData);
+            throw new Error('Invalid texture or sampler');
+        }
+
         try {
-            return this.device.createBindGroupLayout({
+            return this.device.createBindGroup({
+                layout: this.bindGroupLayout,
                 entries: [
                     {
                         binding: 0,
-                        visibility: GPUShaderStage.FRAGMENT,
-                        sampler: { type: 'filtering' }
+                        resource: textureData.sampler
                     },
                     {
                         binding: 1,
-                        visibility: GPUShaderStage.FRAGMENT,
-                        texture: { sampleType: 'float' }
+                        resource: textureData.texture.createView()
                     }
                 ]
             });
         } catch (error) {
-            console.error('Failed to create bind group layout:', error);
-            throw new Error('Failed to initialize MaskManager: ' + error.message);
+            console.error('Failed to create bind group:', error);
+            throw error;
         }
     }
 
     async addMask(id, imageUrlOrFile) {
-        if (!id) throw new Error('Mask ID is required');
-        if (!imageUrlOrFile) throw new Error('Image source is required');
-
         try {
+            console.log(`Loading mask: ${id}`);
+            
             // Load texture
-            const texture = typeof imageUrlOrFile === 'string'
+            const textureData = typeof imageUrlOrFile === 'string'
                 ? await this.textureLoader.loadImage(imageUrlOrFile)
                 : await this.textureLoader.loadImageFromFile(imageUrlOrFile);
 
-            if (!texture) throw new Error('Failed to load texture');
+            console.log('Texture loaded successfully:', {
+                width: textureData.width,
+                height: textureData.height
+            });
 
-            // Create mask metadata
+            // Create bind group
+            const bindGroup = this.createBindGroup(textureData);
+
+            // Create mask object
             const mask = {
                 id,
-                texture,
-                landmarks: null,
-                bindGroup: null,
+                textureData,
+                bindGroup,
                 lastUsed: Date.now()
             };
 
-            // Create bind group
-            try {
-                mask.bindGroup = this.createBindGroup(mask);
-            } catch (bindError) {
-                console.error('Failed to create bind group:', bindError);
-                // Cleanup texture if bind group creation fails
-                texture.texture?.destroy?.();
-                throw bindError;
-            }
-
-            // Add to collections
+            // Store mask
             this.masks.set(id, mask);
             this.maskQueue.push(id);
 
             // Set as active if first mask
             if (!this.activeMaskId) {
                 this.activeMaskId = id;
+                console.log('Set active mask:', id);
             }
 
-            // Cleanup old masks
             this.cleanupOldMasks();
-
+            console.log(`Mask ${id} added successfully`);
             return mask;
+
         } catch (error) {
             console.error(`Failed to add mask ${id}:`, error);
             throw error;
         }
     }
+
+    cleanupOldMasks() {
+        while (this.maskQueue.length > this.maxMasks) {
+            const oldestId = this.maskQueue.shift();
+            if (oldestId !== this.activeMaskId) {
+                const mask = this.masks.get(oldestId);
+                if (mask?.textureData?.texture) {
+                    mask.textureData.texture.destroy();
+                }
+                this.masks.delete(oldestId);
+                console.log(`Cleaned up old mask: ${oldestId}`);
+            }
+        }
+    }
+
 
     createBindGroup(mask) {
         if (!this.bindGroupLayout) {
@@ -116,13 +145,64 @@ export class MaskManager {
         }
     }
 
+    // Make sure we have an active mask
     getActiveMask() {
+        // If no active mask but we have masks, set the first one as active
+        if (!this.activeMaskId && this.masks.size > 0) {
+            this.activeMaskId = Array.from(this.masks.keys())[0];
+            console.log('Auto-selecting first mask:', this.activeMaskId);
+        }
+        
         const mask = this.masks.get(this.activeMaskId);
         if (!mask) {
             console.warn('No active mask found');
             return null;
         }
         return mask;
+    }
+
+    async addMask(id, imageUrlOrFile) {
+        try {
+            let texture;
+            
+            if (typeof imageUrlOrFile === 'string') {
+                texture = await this.textureLoader.loadImage(imageUrlOrFile);
+            } else {
+                texture = await this.textureLoader.loadImageFromFile(imageUrlOrFile);
+            }
+
+            if (!texture) {
+                throw new Error('Failed to load texture');
+            }
+
+            // Create mask metadata
+            const mask = {
+                id,
+                texture,
+                landmarks: null,
+                bindGroup: this.createBindGroup(texture),
+                lastUsed: Date.now()
+            };
+
+            // Add to masks collection
+            this.masks.set(id, mask);
+            this.maskQueue.push(id);
+
+            // Set as active if no active mask
+            if (!this.activeMaskId) {
+                console.log('Setting first mask as active:', id);
+                this.activeMaskId = id;
+            }
+
+            // Clean up old masks
+            this.cleanupOldMasks();
+
+            console.log(`Mask added successfully: ${id}`);
+            return mask;
+        } catch (error) {
+            console.error(`Failed to add mask ${id}:`, error);
+            throw error;
+        }
     }
 
     async setActiveMask(id) {
@@ -232,6 +312,8 @@ export class MaskManager {
             throw error;
         }
     }
+
+    
 
     // Resource cleanup
     destroy() {

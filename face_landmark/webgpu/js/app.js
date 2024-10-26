@@ -169,11 +169,12 @@ async function init() {
         // 11. Start render loop
         // Only start render loop after everything is initialized
          // 11. Verify all components before starting render loop
-         if (isRenderingReady()) {
+     
+        if (activeMask && isVideoReady(videoStream)) {
             requestAnimationFrame(enhancedRender);
-            console.log('Render loop started');
+            console.log('Render loop started with active mask');
         } else {
-            throw new Error('Not all components are ready');
+            throw new Error('Missing required components for render loop');
         }
 
         console.log('Render loop started');
@@ -384,6 +385,15 @@ async function enhancedRender(timestamp) {
             return;
         }
 
+          // Get active mask first
+          const activeMask = maskManager.getActiveMask();
+          if (!activeMask) {
+              console.warn('No active mask available');
+              requestAnimationFrame(enhancedRender);
+              return;
+          }
+
+          
         const deltaTime = timestamp - lastFrameTime;
         lastFrameTime = timestamp;
 
@@ -543,56 +553,114 @@ async function recoveryVideo() {
 }
 
 async function loadDefaultMasks() {
-    const MAX_RETRIES = 3;  // Define retry count
-    const RETRY_DELAY = 1000;  // 1 second delay between retries
-    
     const defaultMasks = [
         'assets/mask/default.jpg',
         'assets/mask/mask2.jpg',
         'assets/mask/mask3.jpg'
     ];
 
-    let loadedAnyMask = false;
+    // Fallback masks (built into your application)
+    const fallbackMasks = [
+        'assets/fallback/basic_mask.jpg',
+        'assets/fallback/simple_mask.png'
+    ];
 
+    let loadedMasks = 0;
+    const errors = [];
+
+    // Try loading default masks first
     for (const maskPath of defaultMasks) {
-        let attempts = 0;
-        
-        while (attempts < MAX_RETRIES) {
-            try {
-                console.log(`Attempting to load mask: ${maskPath} (attempt ${attempts + 1}/${MAX_RETRIES})`);
-                
-                const mask = await maskManager.addMask(maskPath, maskPath);
-                addMaskPreview(mask);
-                
-                // Set first successfully loaded mask as active
-                if (!maskManager.getActiveMask()) {
-                    await maskManager.setActiveMask(mask.id);
-                }
-                
-                loadedAnyMask = true;
-                console.log(`Successfully loaded mask: ${maskPath}`);
-                break;  // Break the retry loop if successful
+        try {
+            console.log(`Attempting to load mask: ${maskPath}`);
+            const mask = await maskManager.addMask(maskPath, maskPath);
+            console.log(`Successfully loaded mask: ${maskPath}`, {
+                width: mask.textureData.width,
+                height: mask.textureData.height
+            });
+            loadedMasks++;
+        } catch (error) {
+            errors.push({ path: maskPath, error });
+            console.warn(`Failed to load mask: ${maskPath}`, error);
+        }
+    }
 
-            } catch (error) {
-                attempts++;
-                console.warn(`Failed to load mask: ${maskPath} (attempt ${attempts}/${MAX_RETRIES})`, error);
-                
-                if (attempts === MAX_RETRIES) {
-                    console.error(`Failed to load mask after ${MAX_RETRIES} attempts: ${maskPath}`);
-                } else {
-                    // Wait before next retry
-                    await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
-                }
+    // If no masks loaded, try fallbacks
+    if (loadedMasks === 0 && fallbackMasks.length > 0) {
+        console.warn('No default masks loaded, trying fallbacks...');
+        for (const fallbackPath of fallbackMasks) {
+            try {
+                const mask = await maskManager.addMask(fallbackPath, fallbackPath);
+                console.log(`Successfully loaded fallback mask: ${fallbackPath}`);
+                loadedMasks++;
+                break; // One fallback is enough
+            } catch (fallbackError) {
+                errors.push({ path: fallbackPath, error: fallbackError });
+                console.error(`Failed to load fallback mask: ${fallbackPath}`, fallbackError);
             }
         }
     }
 
-    // Check if we managed to load at least one mask
-    if (!loadedAnyMask) {
-        throw new Error('Failed to load any masks. Please check your mask files and paths.');
+    // If still no masks, create a programmatic fallback
+    if (loadedMasks === 0) {
+        console.warn('All mask loading failed, creating programmatic fallback');
+        try {
+            const fallbackTexture = await createProgrammaticFallbackTexture(maskManager.device);
+            const mask = await maskManager.addMask('fallback', fallbackTexture);
+            loadedMasks++;
+        } catch (error) {
+            errors.push({ path: 'programmatic-fallback', error });
+            throw new Error('Failed to load any masks, including fallbacks');
+        }
     }
 
-    return loadedAnyMask;
+    if (!loadedAny) {
+        // Create fallback mask
+        try {
+            console.log('Creating fallback mask');
+            const mask = await maskManager.addMask('fallback', null);
+            loadedAny = true;
+        } catch (error) {
+            console.error('Failed to create fallback mask:', error);
+            throw new Error('Failed to load any masks, including fallbacks');
+        }
+    }
+
+    return {
+        loadedMasks,
+        errors
+    };
+}
+async function createProgrammaticFallbackTexture(device) {
+    const canvas = document.createElement('canvas');
+    const size = 256;
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+
+    // Create a simple gradient pattern
+    const gradient = ctx.createLinearGradient(0, 0, size, size);
+    gradient.addColorStop(0, '#444444');
+    gradient.addColorStop(1, '#666666');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, size, size);
+
+    // Add some visual interest
+    ctx.strokeStyle = '#888888';
+    ctx.lineWidth = 2;
+    for (let i = 0; i < size; i += 20) {
+        ctx.beginPath();
+        ctx.moveTo(0, i);
+        ctx.lineTo(size, i);
+        ctx.stroke();
+    }
+
+    // Add text
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '20px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText('Fallback Mask', size/2, size/2);
+
+    return canvas.toDataURL('image/png');
 }
 
 
