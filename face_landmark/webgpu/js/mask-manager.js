@@ -26,6 +26,7 @@ export class MaskManager {
         });
     }
 
+
     createBindGroup(textureData) {
         if (!this.bindGroupLayout) {
             throw new Error('Bind group layout not initialized');
@@ -163,46 +164,167 @@ export class MaskManager {
 
     async addMask(id, imageUrlOrFile) {
         try {
-            let texture;
+            console.log(`Loading mask: ${id}`);
             
-            if (typeof imageUrlOrFile === 'string') {
-                texture = await this.textureLoader.loadImage(imageUrlOrFile);
-            } else {
-                texture = await this.textureLoader.loadImageFromFile(imageUrlOrFile);
-            }
-
-            if (!texture) {
+            // Load texture with error handling
+            let textureData;
+            try {
+                textureData = typeof imageUrlOrFile === 'string'
+                    ? await this.textureLoader.loadImage(imageUrlOrFile)
+                    : await this.textureLoader.loadImageFromFile(imageUrlOrFile);
+            } catch (error) {
+                console.error('Texture loading failed:', error);
                 throw new Error('Failed to load texture');
             }
 
-            // Create mask metadata
+            if (!textureData?.texture || !textureData?.sampler) {
+                throw new Error('Invalid texture data received');
+            }
+
+            // Create bind group with validation
+            let bindGroup;
+            try {
+                bindGroup = this.createBindGroup(textureData);
+            } catch (error) {
+                console.error('Bind group creation failed:', error);
+                throw new Error('Failed to create bind group');
+            }
+
+            // Create mask object
             const mask = {
                 id,
-                texture,
-                landmarks: null,
-                bindGroup: this.createBindGroup(texture),
+                textureData,
+                bindGroup,
                 lastUsed: Date.now()
             };
 
-            // Add to masks collection
+            // Store mask
             this.masks.set(id, mask);
             this.maskQueue.push(id);
 
-            // Set as active if no active mask
+            // Set as active if first mask
             if (!this.activeMaskId) {
-                console.log('Setting first mask as active:', id);
                 this.activeMaskId = id;
+                console.log('Set active mask:', id);
             }
 
-            // Clean up old masks
             this.cleanupOldMasks();
-
-            console.log(`Mask added successfully: ${id}`);
+            console.log(`Mask ${id} added successfully`);
             return mask;
+
         } catch (error) {
             console.error(`Failed to add mask ${id}:`, error);
             throw error;
         }
+    }
+
+    createBindGroup(textureData) {
+        if (!this.bindGroupLayout) {
+            throw new Error('Bind group layout not initialized');
+        }
+
+        if (!textureData?.texture || !textureData?.sampler) {
+            console.error('Invalid texture data:', textureData);
+            throw new Error('Invalid texture or sampler');
+        }
+
+        try {
+            return this.device.createBindGroup({
+                layout: this.bindGroupLayout,
+                entries: [
+                    {
+                        binding: 0,
+                        resource: textureData.sampler
+                    },
+                    {
+                        binding: 1,
+                        resource: textureData.texture.createView()
+                    }
+                ]
+            });
+        } catch (error) {
+            console.error('Failed to create bind group:', error);
+            throw error;
+        }
+    }
+    
+
+    // Updated loadDefaultMasks function
+    async loadDefaultMasks() {
+        console.log('Starting to load default masks...');
+        let loadedAny = false;
+        const errors = [];
+
+        const DEFAULT_MASKS = [
+            {
+                id: 'default',
+                url: 'assets/mask/default.png'
+            },
+            {
+                id: 'einstein',
+                url: 'assets/mask/einstein.png'
+            },
+            // Add more masks as needed
+        ];
+        
+
+        // Try loading each default mask
+        for (const maskInfo of DEFAULT_MASKS) {
+            try {
+                console.log(`Attempting to load mask: ${maskInfo.id}`);
+                await this.addMask(maskInfo.id, maskInfo.url);
+                loadedAny = true;
+                console.log(`Successfully loaded mask: ${maskInfo.id}`);
+                break; // Exit after first successful load
+            } catch (error) {
+                console.warn(`Failed to load mask ${maskInfo.id}:`, error);
+                errors.push({ id: maskInfo.id, error });
+            }
+        }
+
+        // If no masks loaded, create fallback
+        if (!loadedAny) {
+            try {
+                console.log('Creating fallback mask...');
+                const fallbackTexture = await this.createFallbackTexture();
+                await this.addMask('fallback', fallbackTexture);
+                loadedAny = true;
+                console.log('Fallback mask created successfully');
+            } catch (error) {
+                console.error('Failed to create fallback mask:', error);
+                errors.push({ id: 'fallback', error });
+            }
+        }
+
+        if (!loadedAny) {
+            const errorMessage = `Failed to load any masks. Errors: ${JSON.stringify(errors, null, 2)}`;
+            console.error(errorMessage);
+            throw new Error(errorMessage);
+        }
+
+        return loadedAny;
+    }
+
+    // Helper method to create a fallback texture
+    async createFallbackTexture() {
+        const canvas = document.createElement('canvas');
+        const size = 256;
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+
+        // Create a simple pattern
+        const gradient = ctx.createRadialGradient(
+            size/2, size/2, 0,
+            size/2, size/2, size/2
+        );
+        gradient.addColorStop(0, 'rgba(255, 255, 255, 0.9)');
+        gradient.addColorStop(1, 'rgba(255, 255, 255, 0.1)');
+        
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, size, size);
+
+        return canvas.toDataURL('image/png');
     }
 
     async setActiveMask(id) {
